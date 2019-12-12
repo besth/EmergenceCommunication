@@ -49,11 +49,22 @@ class MultiAgentEnv(gym.Env):
                 total_action_space.append(u_action_space)
             # communication action space
             if self.discrete_action_space:
-                c_action_space = spaces.Discrete(world.dim_c)
+                c_action_space = spaces.Discrete((len(world.agents) * world.dim_c))
             else:
-                c_action_space = spaces.Box(low=0.0, high=1.0, shape=(world.dim_c,), dtype=np.float32)
+                c_action_space = spaces.Box(low=0.0, high=1.0, shape=((len(world.agents), world.dim_c)), dtype=np.float32)
             if not agent.silent:
                 total_action_space.append(c_action_space)
+
+            # attacking action space
+            if self.discrete_action_space:
+                a_action_space = spaces.Discrete(world.dim_a)
+            else:
+                a_action_space = spaces.Box(low=-agent.atk_range, high=+agent.atk_range, shape=(world.dim_a,),
+                                            dtype=np.float32)
+
+            if agent.offensive:
+                total_action_space.append(a_action_space)
+
             # total action space
             if len(total_action_space) > 1:
                 # all action spaces are discrete, so simplify to MultiDiscrete action space
@@ -67,14 +78,22 @@ class MultiAgentEnv(gym.Env):
             # observation space
             obs_dim = len(observation_callback(agent, self.world))
             self.observation_space.append(spaces.Box(low=-np.inf, high=+np.inf, shape=(obs_dim,), dtype=np.float32))
-            agent.action.c = np.zeros(self.world.dim_c)
+            # TODO
+            agent.action.c = np.zeros((len(self.world.agents), self.world.dim_c))
+
+            # initialize attacking action as None
+            agent.action.a = np.asarray([0, 0])
 
         # rendering
         self.shared_viewer = shared_viewer
         if self.shared_viewer:
             self.viewers = [None]
+            # self.atk_viewers = [None]
         else:
             self.viewers = [None] * self.n
+            # self.atk_viewers = [None] * self.n
+
+
         self._reset_render()
 
     def step(self, action_n):
@@ -118,6 +137,8 @@ class MultiAgentEnv(gym.Env):
     # get info used for benchmarking
     def _get_info(self, agent):
         if self.info_callback is None:
+            print("No info callback")
+            exit()
             return {}
         return self.info_callback(agent, self.world)
 
@@ -143,7 +164,10 @@ class MultiAgentEnv(gym.Env):
     # set env action for a particular agent
     def _set_action(self, action, agent, action_space, time=None):
         agent.action.u = np.zeros(self.world.dim_p)
-        agent.action.c = np.zeros(self.world.dim_c)
+        agent.action.c = np.zeros((len(self.world.agents), self.world.dim_c))
+        agent.action.a = np.asarray([None for _ in range(self.world.dim_a)])
+
+        # print("setting action", action)
         # process action
         if isinstance(action_space, MultiDiscrete):
             act = []
@@ -182,11 +206,18 @@ class MultiAgentEnv(gym.Env):
             action = action[1:]
         if not agent.silent:
             # communication action
-            if self.discrete_action_input:
-                agent.action.c = np.zeros(self.world.dim_c)
-                agent.action.c[action[0]] = 1.0
-            else:
-                agent.action.c = action[0]
+            # if self.discrete_action_input:
+            #     agent.action.c = np.zeros((len(self.world.agents), self.world.dim_c))
+            #     agent.action.c[action[0]] = 1.0
+            # else:
+            agent.action.c = action[0]
+            action = action[1:]
+
+        if agent.offensive:
+            # attacking action
+            noise = np.random.normal(0, 0.05, 2)
+            agent.action.a = np.clip(action[0] + noise, -1, 1)
+
             action = action[1:]
         # make sure we used all elements of action
         assert len(action) == 0
@@ -195,6 +226,17 @@ class MultiAgentEnv(gym.Env):
     def _reset_render(self):
         self.render_geoms = None
         self.render_geoms_xform = None
+        self.render_geoms_attack = None
+        self.render_geoms_attack_xform = None
+
+
+    def get_rotation_angle(self, x1, y1, x2, y2):
+        import math
+        return math.atan((y2*x1 - x2*y1) / (x1*x2 + y1*y2))
+
+    def distance(self, p1, p2):
+        import math
+        return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[0] - p2[0]) ** 2)
 
     # render environment
     def render(self, mode='human'):
@@ -218,23 +260,53 @@ class MultiAgentEnv(gym.Env):
                 # import rendering only if we need it (and don't import for headless machines)
                 #from gym.envs.classic_control import rendering
                 from multiagent import rendering
-                self.viewers[i] = rendering.Viewer(700,700)
+                print("initialize viewer")
+                self.viewers[i] = rendering.Viewer(700, 700)
+
 
         # create rendering geometry
-        if self.render_geoms is None:
+        if self.render_geoms is None or self.render_geoms is not None:
             # import rendering only if we need it (and don't import for headless machines)
             #from gym.envs.classic_control import rendering
             from multiagent import rendering
             self.render_geoms = []
+            self.render_geoms_attack = []
+            self.render_geoms_line = []
+            self.render_geoms_range = []
             self.render_geoms_xform = []
+            self.render_geoms_attack_xform = []
+            self.render_geoms_line_xform = []
+            self.render_geoms_range_xform = []
             for entity in self.world.entities:
-                geom = rendering.make_circle(entity.size)
+                if "agent" in entity.name:
+                    geom = rendering.make_circle(entity.size)
+                else:
+                    geom = rendering.make_polygon([[0.1, -0.1], [0.1, 0.1], [-0.1, 0.1], [-0.1, -0.1]])
                 xform = rendering.Transform()
+                xform_atk = rendering.Transform()
+                x_form_line = rendering.Transform()
+                # xform_range = rendering.Transform()
+                geom_attack, geom_line, geom_range = None, None, None
                 if 'agent' in entity.name:
-                    geom.set_color(*entity.color, alpha=0.5)
+                    if entity.num_balloons != 0:
+                        geom.set_color(*entity.color, alpha=0.0+0.2*entity.num_balloons)
+                    if entity.action.a[0] and entity.action.a[1]:
+                        geom_attack = rendering.make_circle(entity.size / 4)
+                        geom_attack.add_attr(xform_atk)
+
+                        geom_line = rendering.make_line((0, 0), (entity.action.a[0] - entity.state.p_pos[0], entity.action.a[1] - entity.state.p_pos[1]))
+                        geom_line.add_attr(x_form_line)
+
                 else:
                     geom.set_color(*entity.color)
                 geom.add_attr(xform)
+
+                self.render_geoms_line.append(geom_line)
+                self.render_geoms_line_xform.append(x_form_line)
+
+                self.render_geoms_attack.append(geom_attack)
+                self.render_geoms_attack_xform.append(xform_atk)
+
                 self.render_geoms.append(geom)
                 self.render_geoms_xform.append(xform)
 
@@ -243,6 +315,14 @@ class MultiAgentEnv(gym.Env):
                 viewer.geoms = []
                 for geom in self.render_geoms:
                     viewer.add_geom(geom)
+
+                for atk_geom in self.render_geoms_attack:
+                    if atk_geom:
+                        viewer.add_geom(atk_geom)
+
+                for line_geom in self.render_geoms_line:
+                    if line_geom:
+                        viewer.add_geom(line_geom)
 
         results = []
         for i in range(len(self.viewers)):
@@ -257,6 +337,13 @@ class MultiAgentEnv(gym.Env):
             # update geometry positions
             for e, entity in enumerate(self.world.entities):
                 self.render_geoms_xform[e].set_translation(*entity.state.p_pos)
+
+            for a, agent in enumerate(self.world.agents):
+                self.render_geoms_attack_xform[a].set_translation(*agent.action.a)
+
+            for a, agent in enumerate(self.world.agents):
+                self.render_geoms_line_xform[a].set_translation(*agent.state.p_pos)
+
             # render to display or array
             results.append(self.viewers[i].render(return_rgb_array = mode=='rgb_array'))
 

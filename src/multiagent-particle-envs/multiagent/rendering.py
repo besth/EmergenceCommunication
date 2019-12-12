@@ -257,6 +257,9 @@ def make_polygon(v, filled=True):
 def make_polyline(v):
     return PolyLine(v, False)
 
+def make_line(start, end):
+    return Line(start, end)
+
 def make_capsule(length, width):
     l, r, t, b = 0, length, width/2, -width/2
     box = make_polygon([(l,b), (l,t), (r,t), (r,b)])

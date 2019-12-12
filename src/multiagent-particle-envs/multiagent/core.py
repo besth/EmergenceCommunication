@@ -78,6 +78,27 @@ class Agent(Entity):
         # script behavior to execute
         self.action_callback = None
 
+        # add number of balloons
+        self.num_balloons = 0
+        self.init_num_balloons = 0
+        self.offensive = True
+
+        # team id
+        self.team = None
+
+        # range of observation
+        self.obs_range = 0.0
+
+        # range of attacking
+        self.atk_range = 0.0
+
+        # history trajectory
+        self.history = []
+        self.memory_size = 100
+
+        # assign an index to all
+        self.index = None
+
 # multi-agent world
 class World(object):
     def __init__(self):
@@ -97,6 +118,9 @@ class World(object):
         # contact response parameters
         self.contact_force = 1e+2
         self.contact_margin = 1e-3
+
+        # add attacking action dimension
+        self.dim_a = self.dim_p
 
     # return all entities in the world
     @property
@@ -129,6 +153,19 @@ class World(object):
         # update agent state
         for agent in self.agents:
             self.update_agent_state(agent)
+
+        # apply attacking action
+        for agent in self.agents:
+            # print(agent.action.a)
+            if agent.offensive and agent.action.a[0] and agent.action.a[1]:
+                # make sure this agent attacks
+                for other in self.agents:
+                    if agent == other or agent.team == other.team:
+                        continue
+                    else:
+                        if other.state.p_pos[0] - other.size <= agent.action.a[0] <= other.state.p_pos[0] + other.size and other.state.p_pos[1] - other.size <= agent.action.a[1] <= other.state.p_pos[1] + other.size:
+                            other.num_balloons -= 1
+
 
     # gather agent action forces
     def apply_action_force(self, p_force):
@@ -167,14 +204,16 @@ class World(object):
                     entity.state.p_vel = entity.state.p_vel / np.sqrt(np.square(entity.state.p_vel[0]) +
                                                                   np.square(entity.state.p_vel[1])) * entity.max_speed
             entity.state.p_pos += entity.state.p_vel * self.dt
+            entity.state.p_pos = np.clip(entity.state.p_pos, -1, 1)
 
     def update_agent_state(self, agent):
         # set communication state (directly for now)
         if agent.silent:
             agent.state.c = np.zeros(self.dim_c)
         else:
-            noise = np.random.randn(*agent.action.c.shape) * agent.c_noise if agent.c_noise else 0.0
-            agent.state.c = agent.action.c + noise      
+            # noise = np.random.randn(*agent.action.c.shape) * agent.c_noise if agent.c_noise else 0.0
+            # agent.state.c = agent.action.c + noise
+            agent.state.c = agent.action.c
 
     # get collision forces for any contact between two entities
     def get_collision_force(self, entity_a, entity_b):
