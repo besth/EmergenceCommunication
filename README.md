@@ -11,7 +11,7 @@
 - To install, `cd` into the root directory and type `pip install -e .` 
 
 ## Scenarios
-# Balloon
+### Balloon
 -  In multiagent-particle-envs/multiagent/scenarios/simple_balloon.py. Number of agents in both teams can be easily modified in make_world function.
 
 ## How to run
